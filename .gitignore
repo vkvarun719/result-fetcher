@@ -1,0 +1,5 @@
+vtu-result-fetcher-main/node_modules/
+vtu-result-fetcher-main/.wa_session/
+vtu-result-fetcher-main/*.csv
+vtu-result-fetcher-main/*.xlsx
+vtu-result-fetcher-main/google_credentials.json

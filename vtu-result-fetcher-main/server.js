@@ -1213,6 +1213,240 @@ const server = http.createServer(async function(req, res) {
     return;
   }
 
+  // ─── /api/export-excel ────────────────────────────────────────────────────
+  if (req.method === 'POST' && req.url === '/api/export-excel') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { results } = JSON.parse(body);
+        if (!results || !results.length) return jsonRes(400, { success: false, error: 'No results provided.' });
+
+        // ── Determine max subject count across all students ──────────────────
+        const maxSubs = results.reduce((m, r) => Math.max(m, (r.subjects || []).length), 0);
+
+        // ── Helper: VTU Classification ───────────────────────────────────────
+        function getClassification(pct, overallResult) {
+          if ((overallResult || '').toUpperCase() !== 'PASS') return 'FAIL';
+          if (pct >= 70) return 'FCD';
+          if (pct >= 60) return 'FC';
+          if (pct >= 50) return 'SC';
+          if (pct >= 40) return 'P';
+          return 'FAIL';
+        }
+
+        // ── Build worksheet data ─────────────────────────────────────────────
+        const headerRow1 = ['USN', 'Student Name'];
+        const headerRow2 = ['',    ''];
+
+        for (let i = 0; i < maxSubs; i++) {
+          let subLabel = 'Subject ' + (i + 1);
+          for (const r of results) {
+            const s = (r.subjects || [])[i];
+            if (s && s.name) { subLabel = s.name; break; }
+          }
+          headerRow1.push(subLabel, '', '', '');
+          headerRow2.push('Internal Marks', 'External Marks', 'Total', 'Result');
+        }
+
+        headerRow1.push('TOTAL', 'PERCENTAGE', 'Result', 'Classification', 'Fail', 'Absentee');
+        headerRow2.push('',       '',           '',       '',               '',     '');
+
+        const dataRows = results.map(r => {
+          const subs = r.subjects || [];
+          const row = [r.usn || '', r.name || ''];
+          let grandTotal = 0;
+          const maxPossible = maxSubs * 100;
+          let failCount = 0;
+          let absentCount = 0;
+
+          for (let i = 0; i < maxSubs; i++) {
+            const s = subs[i];
+            if (s) {
+              const tot = parseInt(s.total) || 0;
+              grandTotal += tot;
+              
+              const res = (s.result || '').toUpperCase();
+              if (res === 'F' || res === 'FAIL') failCount++;
+              if (res === 'A' || res === 'ABS' || res === 'ABSENT' || res === 'X') absentCount++;
+
+              row.push(
+                s.internal !== undefined ? (isNaN(parseInt(s.internal)) ? s.internal : parseInt(s.internal)) : '',
+                s.external !== undefined ? (isNaN(parseInt(s.external)) ? s.external : parseInt(s.external)) : '',
+                tot || '',
+                s.result || ''
+              );
+            } else {
+              row.push('', '', '', '');
+            }
+          }
+
+          const pct = maxPossible > 0 ? Math.round((grandTotal / maxPossible) * 10000) / 100 : 0;
+          const classification = getClassification(pct, r.overallResult);
+          row.push(grandTotal || '', pct || '', r.overallResult || '', classification, failCount, absentCount);
+          return row;
+        });
+
+        // ── Build workbook ───────────────────────────────────────────────────
+        const wb = XLSX.utils.book_new();
+        const wsData = [headerRow1, headerRow2, ...dataRows];
+        const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+        // ── Column widths ────────────────────────────────────────────────────
+        const colWidths = [{ wch: 14 }, { wch: 28 }];
+        for (let i = 0; i < maxSubs; i++) {
+          colWidths.push({ wch: 16 }, { wch: 16 }, { wch: 8 }, { wch: 10 });
+        }
+        colWidths.push({ wch: 10 }, { wch: 14 }, { wch: 10 }, { wch: 16 }, { wch: 8 }, { wch: 10 });
+        ws['!cols'] = colWidths;
+
+        // ── Merge cells for subject headers in Row 1 ─────────────────────────
+        const merges = [];
+        merges.push({ s: { r: 0, c: 0 }, e: { r: 1, c: 0 } }); // USN
+        merges.push({ s: { r: 0, c: 1 }, e: { r: 1, c: 1 } }); // Name
+        let col = 2;
+        for (let i = 0; i < maxSubs; i++) {
+          merges.push({ s: { r: 0, c: col }, e: { r: 0, c: col + 3 } });
+          col += 4;
+        }
+        merges.push({ s: { r: 0, c: col     }, e: { r: 1, c: col     } }); // TOTAL
+        merges.push({ s: { r: 0, c: col + 1 }, e: { r: 1, c: col + 1 } }); // PERCENTAGE
+        merges.push({ s: { r: 0, c: col + 2 }, e: { r: 1, c: col + 2 } }); // Result
+        merges.push({ s: { r: 0, c: col + 3 }, e: { r: 1, c: col + 3 } }); // Classification
+        merges.push({ s: { r: 0, c: col + 4 }, e: { r: 1, c: col + 4 } }); // Fail
+        merges.push({ s: { r: 0, c: col + 5 }, e: { r: 1, c: col + 5 } }); // Absentee
+        ws['!merges'] = merges;
+
+        // ── Row heights ───────────────────────────────────────────────────────
+        ws['!rows'] = [{ hpt: 36 }, { hpt: 28 }];
+
+        // ── Cell styles ───────────────────────────────────────────────────────
+        const totalCols = 2 + maxSubs * 4 + 6;
+        const numRows   = wsData.length;
+
+        const S = {
+          headerFill:    { patternType: 'solid', fgColor: { rgb: '2E4DA7' } },
+          subHeaderFill: { patternType: 'solid', fgColor: { rgb: '6B8CCA' } },
+          fcdFill:       { patternType: 'solid', fgColor: { rgb: 'FFD700' } },
+          fcFill:        { patternType: 'solid', fgColor: { rgb: '70AD47' } },
+          scFill:        { patternType: 'solid', fgColor: { rgb: 'FFC000' } },
+          passFill:      { patternType: 'solid', fgColor: { rgb: 'FFEB9C' } },
+          failFill:      { patternType: 'solid', fgColor: { rgb: 'FF6B6B' } },
+          passResFill:   { patternType: 'solid', fgColor: { rgb: 'C6EFCE' } },
+          failResFill:   { patternType: 'solid', fgColor: { rgb: 'FFC7CE' } },
+          evenFill:      { patternType: 'solid', fgColor: { rgb: 'F2F7FF' } },
+          whiteFill:     { patternType: 'none' },
+          headerFont:    { bold: true, color: { rgb: 'FFFFFF' }, sz: 11 },
+          subHFont:      { bold: true, color: { rgb: 'FFFFFF' }, sz: 10 },
+          boldFont:      { bold: true, sz: 10 },
+          normalFont:    { sz: 10 },
+          center:        { horizontal: 'center', vertical: 'center', wrapText: true },
+          left:          { horizontal: 'left',   vertical: 'center' },
+          thinBorder:    { top: { style: 'thin', color: { rgb: 'D0D0D0' } }, bottom: { style: 'thin', color: { rgb: 'D0D0D0' } }, left: { style: 'thin', color: { rgb: 'D0D0D0' } }, right: { style: 'thin', color: { rgb: 'D0D0D0' } } }
+        };
+
+        function ensureCell(sheet, r, c) {
+          const addr = XLSX.utils.encode_cell({ r, c });
+          if (!sheet[addr]) sheet[addr] = { v: '', t: 's' };
+          return sheet[addr];
+        }
+
+        // Header rows styling
+        for (let c = 0; c < totalCols; c++) {
+          ensureCell(ws, 0, c).s = { fill: S.headerFill,    font: S.headerFont, alignment: S.center };
+          ensureCell(ws, 1, c).s = { fill: S.subHeaderFill, font: S.subHFont,   alignment: S.center };
+        }
+
+        // Data rows styling
+        for (let r = 2; r < numRows; r++) {
+          const dr = dataRows[r - 2];
+          const classVal  = dr[dr.length - 3];
+          const resultVal = (dr[dr.length - 4] || '').toString().toUpperCase();
+          const failVal = dr[dr.length - 2];
+          const isPass    = resultVal === 'PASS';
+          const isEvenRow = (r % 2 === 0);
+          const rowFill   = isEvenRow ? S.evenFill : S.whiteFill;
+
+          for (let c = 0; c < totalCols; c++) {
+            const cell = ensureCell(ws, r, c);
+            const isClassCol  = c === totalCols - 3;
+            const isResultCol = c === totalCols - 4;
+            const isFailCol = c === totalCols - 2;
+            let fillStyle = rowFill;
+            let fontStyle = S.normalFont;
+
+            if (isClassCol) {
+              switch (classVal) {
+                case 'FCD': fillStyle = S.fcdFill;  fontStyle = S.boldFont; break;
+                case 'FC':  fillStyle = S.fcFill;   fontStyle = S.boldFont; break;
+                case 'SC':  fillStyle = S.scFill;   fontStyle = S.boldFont; break;
+                case 'P':   fillStyle = S.passFill; fontStyle = S.boldFont; break;
+                default:    fillStyle = S.failFill; fontStyle = S.boldFont; break;
+              }
+            } else if (isResultCol) {
+              fillStyle = isPass ? S.passResFill : S.failResFill;
+              fontStyle = S.boldFont;
+            } else if (isFailCol) {
+              if (failVal > 0) {
+                 fillStyle = S.failFill;
+                 fontStyle = S.boldFont;
+              }
+            }
+
+            cell.s = {
+              fill: fillStyle,
+              font: fontStyle,
+              alignment: (c <= 1) ? S.left : S.center,
+              border: S.thinBorder
+            };
+          }
+        }
+
+        // ── Classification Legend sheet ────────────────────────────────────────
+        const legendData = [
+          ['Classification',              'Abbreviation', 'Aggregate Percentage'],
+          ['First Class with Distinction','FCD',          '70% and above'       ],
+          ['First Class',                 'FC',           '60% to 69.99%'       ],
+          ['Second Class',                'SC',           '50% to 59.99%'       ],
+          ['Pass Class',                  'P',            '40% to 49.99%'       ],
+        ];
+        const wsLeg = XLSX.utils.aoa_to_sheet(legendData);
+        wsLeg['!cols'] = [{ wch: 36 }, { wch: 16 }, { wch: 24 }];
+        wsLeg['!rows'] = [{ hpt: 28 }, { hpt: 24 }, { hpt: 24 }, { hpt: 24 }, { hpt: 24 }];
+        ['A1','B1','C1'].forEach(addr => {
+          if (!wsLeg[addr]) wsLeg[addr] = { v: '', t: 's' };
+          wsLeg[addr].s = { fill: S.headerFill, font: S.headerFont, alignment: S.center };
+        });
+        const legFills = [S.fcdFill, S.fcFill, S.scFill, S.passFill];
+        for (let i = 0; i < 4; i++) {
+          ['A','B','C'].forEach(col => {
+            const addr = col + (i + 2);
+            if (!wsLeg[addr]) wsLeg[addr] = { v: '', t: 's' };
+            wsLeg[addr].s = { fill: legFills[i], font: S.boldFont, alignment: (col === 'A') ? S.left : S.center, border: S.thinBorder };
+          });
+        }
+        wsLeg['!merges'] = [];
+
+        XLSX.utils.book_append_sheet(wb, ws,    'VTU Results');
+        XLSX.utils.book_append_sheet(wb, wsLeg, 'Classification Key');
+
+        const xlsBuf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx', cellStyles: true });
+
+        res.writeHead(200, {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'Content-Disposition': 'attachment; filename="vtu_results_' + new Date().toISOString().slice(0,10) + '.xlsx"',
+          'Access-Control-Allow-Origin': '*',
+          'Content-Length': xlsBuf.length
+        });
+        res.end(xlsBuf);
+      } catch(e) {
+        console.error('[ExcelExport]', e.message);
+        jsonRes(500, { success: false, error: e.message });
+      }
+    });
+    return;
+  }
+
   // Static files
 
   let urlPath = req.url.split('?')[0];

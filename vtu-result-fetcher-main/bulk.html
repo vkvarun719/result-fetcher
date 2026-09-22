@@ -529,6 +529,7 @@
         <button class="filter-btn" onclick="setFilter('FAIL',this)">❌ Fail</button>
         <button class="filter-btn" onclick="setFilter('ERROR',this)">⚠ Error</button>
         <button class="btn btn-outline btn-sm" onclick="exportCSV()">⬇ Export CSV</button>
+        <button class="btn btn-primary btn-sm" onclick="exportExcel()">📊 Export Excel</button>
         <button class="btn btn-success btn-sm" id="save-sheets-btn" onclick="saveToSheets()" style="display:none">
           💾 Save to Google Sheets
         </button>
@@ -1576,6 +1577,36 @@
     a.href = 'data:text/csv;charset=utf-8,\uFEFF' + encodeURIComponent(csv);
     a.download = 'vtu_results_' + new Date().toISOString().slice(0,10) + '.csv';
     a.click();
+  }
+
+  // ── Export Excel ────────────────────────────────────────────────────────────
+  async function exportExcel() {
+    if (!allResults.length) { alert('No results to export.'); return; }
+    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('Export Excel'));
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Generating...'; }
+    try {
+      const res = await fetch('/api/export-excel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ results: allResults })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+        alert('❌ Export failed: ' + (err.error || res.statusText));
+        return;
+      }
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = 'vtu_results_' + new Date().toISOString().slice(0,10) + '.xlsx';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch(e) {
+      alert('❌ Export error: ' + e.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = '📊 Export Excel'; }
+    }
   }
 
   // ── Save to Sheets ─────────────────────────────────────────────────────────
